@@ -4,7 +4,12 @@ import { finiteRange, hexColor, tileInMap } from "./validation.js";
 import { ASSET_PACK } from "../packs/index.js";
 import { Layer, isWallLayer } from "../layer.js";
 import { LightKind } from "./light-kind.js";
-import { ownerOf, partsOf, placedParts } from "./parts.js";
+import {
+  addWindowParts as addPartRelations,
+  ownerOf,
+  partsOf,
+  placedParts,
+} from "./parts.js";
 
 export const WINDOW_DEFAULTS = Object.freeze({
   enabled: true,
@@ -14,10 +19,6 @@ export const WINDOW_DEFAULTS = Object.freeze({
   radius: 3.5,
   shadows: true,
 });
-
-// The catalogue's windows and split-window parts; see the pack for details.
-const definitions = ASSET_PACK.windows;
-const parts = ASSET_PACK.windowParts;
 
 const packRgb = ([r, g, b]) => (r << 16) | (g << 8) | b;
 
@@ -46,52 +47,91 @@ function spriteOrigin(layer, x, y, height) {
 
 // Each part's own glass. Which window it belongs to, and where, is the
 // shared part relation's business (parts.js).
-export const WINDOW_PARTS = new Map(
-  parts.map(([graphic, layer, owner, dx, dy, height, bounds, glass]) => [
-    graphic,
-    {
-      ...glassSpec(`${graphic}-part`, graphic, layer, height, bounds, glass),
-      owner,
-      dx,
-      dy,
-    },
-  ]),
-);
+export const WINDOW_PARTS = new Map();
 
 // The light source sits at the centre of all of a window's glass, including
 // a partner part, in the owner bitmap's coordinates. Opening height depends
 // only on the bitmaps, so it is computed once per graphic.
-export const WINDOW_DEFINITIONS = new Map(
-  definitions.map(([graphic, layer, height, bounds, glass, name, defaults]) => {
-    let [left, top, right, bottom] = bounds;
-    for (const { graphic: partGraphic, dx, dy } of partsOf(layer, graphic)) {
-      const part = WINDOW_PARTS.get(partGraphic);
-      const own = spriteOrigin(layer, 0, 0, height);
-      const other = spriteOrigin(layer, dx, dy, part.height);
-      const offsetX = other.x - own.x,
-        offsetY = other.y - own.y;
-      left = Math.min(left, part.bounds[0] + offsetX);
-      top = Math.min(top, part.bounds[1] + offsetY);
-      right = Math.max(right, part.bounds[2] + offsetX);
-      bottom = Math.max(bottom, part.bounds[3] + offsetY);
-    }
-    const centreX = (left + right) / 2,
-      centreY = (top + bottom) / 2;
-    const surface = wallSurfaceVertex(layer, 0, 0, height, centreX, centreY);
-    return [
-      graphic,
-      {
-        ...glassSpec(`${graphic}`, graphic, layer, height, bounds, glass),
-        name,
-        fixture: defaults ? "lantern" : "window",
-        defaults: Object.freeze({ ...WINDOW_DEFAULTS, ...defaults }),
-        centreX,
-        centreY,
-        sourceHeight: surface.height,
-      },
-    ];
-  }),
-);
+export const WINDOW_DEFINITIONS = new Map();
+
+function partSpec([graphic, layer, owner, dx, dy, height, bounds, glass]) {
+  return {
+    ...glassSpec(`${graphic}-part`, graphic, layer, height, bounds, glass),
+    owner,
+    dx,
+    dy,
+  };
+}
+
+function definitionOf([graphic, layer, height, bounds, glass, name, defaults]) {
+  let [left, top, right, bottom] = bounds;
+  for (const { graphic: partGraphic, dx, dy } of partsOf(layer, graphic)) {
+    const part = WINDOW_PARTS.get(partGraphic);
+    const own = spriteOrigin(layer, 0, 0, height);
+    const other = spriteOrigin(layer, dx, dy, part.height);
+    const offsetX = other.x - own.x,
+      offsetY = other.y - own.y;
+    left = Math.min(left, part.bounds[0] + offsetX);
+    top = Math.min(top, part.bounds[1] + offsetY);
+    right = Math.max(right, part.bounds[2] + offsetX);
+    bottom = Math.max(bottom, part.bounds[3] + offsetY);
+  }
+  const centreX = (left + right) / 2,
+    centreY = (top + bottom) / 2;
+  const surface = wallSurfaceVertex(layer, 0, 0, height, centreX, centreY);
+  return {
+    ...glassSpec(`${graphic}`, graphic, layer, height, bounds, glass),
+    name,
+    fixture: defaults ? "lantern" : "window",
+    defaults: Object.freeze({ ...WINDOW_DEFAULTS, ...defaults }),
+    centreX,
+    centreY,
+    sourceHeight: surface.height,
+  };
+}
+
+/**
+ * Adds window parts, as the pack lists them: glass that continues a window
+ * onto a neighbouring sprite. Add them before the windows they belong to.
+ */
+export function addWindowParts(entries) {
+  for (const entry of entries) {
+    if (WINDOW_PARTS.has(entry[0]))
+      throw new Error(`Graphic ${entry[0]} is already a window part.`);
+    WINDOW_PARTS.set(entry[0], partSpec(entry));
+  }
+  addPartRelations(entries);
+}
+
+/**
+ * Adds windows and wall fixtures, as the pack lists them: [graphic, layer,
+ * bitmap height, glass bounds, glass colour(s), name, fixture defaults].
+ */
+export function addWindows(entries) {
+  for (const entry of entries) {
+    const [graphic, , height, [left, top, right, bottom]] = entry;
+    if (WINDOW_DEFINITIONS.has(graphic))
+      throw new Error(`Graphic ${graphic} is already a window.`);
+    if (!(
+      0 <= left &&
+      left < right &&
+      right <= 32 &&
+      0 <= top &&
+      top < bottom &&
+      bottom <= height
+    ))
+      throw new Error(
+        `Graphic ${graphic}'s glass lies outside its 32x${height} bitmap.`,
+      );
+    WINDOW_DEFINITIONS.set(graphic, definitionOf(entry));
+  }
+}
+
+// The pack's own; parts.js registers the pack's part relations as it loads.
+for (const entry of ASSET_PACK.windowParts)
+  WINDOW_PARTS.set(entry[0], partSpec(entry));
+for (const entry of ASSET_PACK.windows)
+  WINDOW_DEFINITIONS.set(entry[0], definitionOf(entry));
 
 export function windowKey(x, y, layer, graphic) {
   return `${x},${y},${layer},${graphic}`;

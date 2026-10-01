@@ -2,13 +2,14 @@ import { finiteRange, hexColor, tileInMap } from "./validation.js";
 import { ASSET_PACK } from "../packs/index.js";
 import { Layer } from "../layer.js";
 import { LightKind } from "./light-kind.js";
-import { ownerOf, partTiles, placedParts } from "./parts.js";
+import { addLampParts, ownerOf, partTiles, placedParts } from "./parts.js";
 
 // Lamps and free lights: presets, lookup on the map and settings validation.
 
-// Lamp presets come from the pack catalogue. Other packs can override them.
+// Lamp presets come from the pack catalogue, and any a game adds with
+// extendCatalogue.
 export const CHICAGO_AMBER = ASSET_PACK.chicagoAmber;
-export const LAMP_PRESETS = ASSET_PACK.lamps;
+export const LAMP_PRESETS = [];
 
 export const FREE_LIGHT_PRESET = {
   id: "free",
@@ -27,20 +28,43 @@ export const FREE_LIGHT_PRESET = {
 // Called for every object graphic on each placement and redraw. A variant is
 // either identical artwork (a graphic ID) or its own sprite, such as a mirror
 // image, that overrides the preset's anchor or height.
-const PRESETS_BY_GRAPHIC = new Map(
-  LAMP_PRESETS.flatMap((preset) => [
+const PRESETS_BY_GRAPHIC = new Map();
+const PRESETS_BY_ID = new Map([[FREE_LIGHT_PRESET.id, FREE_LIGHT_PRESET]]);
+
+// A preset claims its graphic and its variants' graphics, which no other
+// lamp may have claimed.
+function claim(preset) {
+  if (PRESETS_BY_ID.has(preset.id))
+    throw new Error(`A lamp is already called ${preset.id}.`);
+  const claims = [
     [preset.graphic, preset],
     ...(preset.variants ?? []).map((variant) =>
       typeof variant === "number"
         ? [variant, preset]
         : [variant.graphic, { ...preset, ...variant }],
     ),
-  ]),
-);
+  ];
+  for (const [graphic] of claims)
+    if (PRESETS_BY_GRAPHIC.has(graphic))
+      throw new Error(
+        `Graphic ${graphic} is already the ${PRESETS_BY_GRAPHIC.get(graphic).id} lamp.`,
+      );
+  for (const [graphic, claimed] of claims)
+    PRESETS_BY_GRAPHIC.set(graphic, claimed);
+  PRESETS_BY_ID.set(preset.id, preset);
+  LAMP_PRESETS.push(preset);
+}
 
-const PRESETS_BY_ID = new Map(
-  [FREE_LIGHT_PRESET, ...LAMP_PRESETS].map((preset) => [preset.id, preset]),
-);
+/** Adds lamp presets, with their parts. */
+export function addLamps(presets) {
+  for (const preset of presets) {
+    claim(preset);
+    addLampParts(preset);
+  }
+}
+
+// The pack's own; parts.js registers their parts as it loads.
+for (const preset of ASSET_PACK.lamps) claim(preset);
 
 // The preset a tool state names: a lamp's id, or "free" for a free light.
 export function presetById(id) {

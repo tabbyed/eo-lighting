@@ -5,8 +5,9 @@
 export { Layer, isWallLayer } from "./layer.js";
 export { isRgbaPixels } from "./pixels.js";
 
-// The catalogue of the native graphics.
+// The catalogue of the native graphics, and a game's own art added to it.
 export { ASSET_PACK } from "./packs/index.js";
+export { extendCatalogue } from "./catalogue.js";
 
 // Lights: settings, lamps, free lights, windows and multi-sprite fixtures.
 export { LightKind } from "./model/light-kind.js";

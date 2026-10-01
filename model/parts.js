@@ -24,12 +24,20 @@ function register(part) {
   OWNERS.set(key(part.layer, part.graphic), part);
 }
 
-// Lamps list their parts; each window part names its owner.
-for (const preset of ASSET_PACK.lamps)
+/** Registers the parts a lamp preset lists, drawn with it on the objects layer. */
+export function addLampParts(preset) {
   for (const { graphic, dx, dy } of preset.parts ?? [])
     register({ layer: Layer.Objects, graphic, owner: preset.graphic, dx, dy });
-for (const [graphic, layer, owner, dx, dy] of ASSET_PACK.windowParts)
-  register({ layer, graphic, owner, dx, dy });
+}
+
+/** Registers window parts, each naming its owner, as the pack lists them. */
+export function addWindowParts(entries) {
+  for (const [graphic, layer, owner, dx, dy] of entries)
+    register({ layer, graphic, owner, dx, dy });
+}
+
+addWindowParts(ASSET_PACK.windowParts);
+for (const preset of ASSET_PACK.lamps) addLampParts(preset);
 
 /** The parts drawn with an owner graphic on a layer. */
 export function partsOf(layer, owner) {

@@ -1,8 +1,14 @@
 import { ASSET_PACK } from "../packs/index.js";
 import { Layer } from "../layer.js";
 
-// Graphics that block light; see the pack catalogue for how they were chosen.
+// Graphics that block light: the pack's (see it for how they were chosen),
+// and any a game adds with extendCatalogue.
 export const SOLID_WALL_GRAPHICS = new Set(ASSET_PACK.solidWalls);
+
+/** Counts more wall graphics as solid. */
+export function addSolidWalls(graphics) {
+  for (const graphic of graphics) SOLID_WALL_GRAPHICS.add(graphic);
+}
 
 export const SHADOW_RAYS = 512;
 

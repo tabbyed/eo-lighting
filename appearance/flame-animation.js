@@ -2,9 +2,24 @@ import { isRgbaPixels } from "../pixels.js";
 import { ASSET_PACK } from "../packs/index.js";
 import { isGlowing } from "./lamp-emission.js";
 
-// Moving flames for the lighting preview, from the pack catalogue.
-export const FLAMES = ASSET_PACK.flames;
+// Moving flames for the lighting preview: the pack's, and any a game adds.
+export const FLAMES = new Map(ASSET_PACK.flames);
 const PALETTE = ASSET_PACK.flamePalette;
+
+/**
+ * Adds moving flames: [graphic, flame], as the pack lists them. A flame may
+ * name one of the pack's shapes ("candle", "standing" or "taper") as
+ * `shape` instead of giving its frames.
+ */
+export function addFlames(entries) {
+  for (const [graphic, { shape, ...flame }] of entries) {
+    if (FLAMES.has(graphic))
+      throw new Error(`Graphic ${graphic} already has a flame.`);
+    const frames = shape ? ASSET_PACK.flameShapes[shape] : flame.frames;
+    if (!frames) throw new Error(`No flame shape called ${shape}.`);
+    FLAMES.set(graphic, { ...flame, frames });
+  }
+}
 
 // Uneven steps keep the flicker from settling into a beat. Every flame
 // changes on the same steps, so redraws stay near six a second however many

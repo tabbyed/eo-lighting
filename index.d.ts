@@ -109,8 +109,7 @@ export interface LampPreset {
   anchor: { x: number; y: number };
   description: string;
   variants?: readonly (
-    | number
-    | { graphic: number; [override: string]: unknown }
+    number | { graphic: number; [override: string]: unknown }
   )[];
   parts?: readonly { graphic: number; dx: number; dy: number }[];
   kind?: LightKindName;
@@ -468,9 +467,7 @@ export interface GlowTextures<F> {
   get(
     graphic: number,
   ):
-    | { mask: F; halo: F & { width: number; height: number } }
-    | null
-    | undefined;
+    { mask: F; halo: F & { width: number; height: number } } | null | undefined;
   getFlame(graphic: number):
     | {
         base: F | null;
@@ -530,3 +527,62 @@ export declare const ASSET_PACK: Readonly<{
   solidWalls: readonly number[];
   [entry: string]: unknown;
 }>;
+
+/** A lamp's glass or flame, inclusive, in sprite pixels. */
+export interface GlassRegion {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** A moving flame: the pack's shape by name, or frames of its own. */
+export interface FlameEntry {
+  shape?: "candle" | "standing" | "taper";
+  frames?: readonly (readonly string[])[];
+  x: number;
+  y: number;
+  clear?: readonly [number, number, number, number];
+  mirror?: boolean;
+}
+
+type Rgb = readonly [number, number, number];
+
+/** [graphic, layer, bitmap height, glass bounds (exclusive), glass colour(s), name, fixture defaults] */
+export type WindowEntry = readonly [
+  number,
+  number,
+  number,
+  readonly [number, number, number, number],
+  Rgb | readonly Rgb[],
+  string,
+  Partial<Pick<LampPreset, "color" | "brightness" | "glow" | "radius">>?,
+];
+
+/** [graphic, layer, owner graphic, dx, dy, bitmap height, glass bounds, glass colour(s)] */
+export type WindowPartEntry = readonly [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  readonly [number, number, number, number],
+  Rgb | readonly Rgb[],
+];
+
+/** A game's own art for the catalogue; see extendCatalogue. */
+export interface CatalogueExtension {
+  solidWalls?: readonly number[];
+  lamps?: readonly LampPreset[];
+  bulbGlass?: readonly (readonly [number, GlassRegion])[];
+  flames?: readonly (readonly [number, FlameEntry])[];
+  windowParts?: readonly WindowPartEntry[];
+  windows?: readonly WindowEntry[];
+}
+
+/**
+ * Adds a game's own art to the catalogue, once, before any LightField is
+ * made. A graphic already in the catalogue is refused, not replaced.
+ */
+export declare function extendCatalogue(extension: CatalogueExtension): void;
