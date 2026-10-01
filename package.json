@@ -1,7 +1,7 @@
 {
   "name": "eo-lighting",
-  "version": "0.1.0",
-  "description": "Lighting for Endless Online maps: lamps, windows, walls that block light and a cached light field. Shared by the eomap-js editor and game clients.",
+  "version": "0.2.0",
+  "description": "Lighting for Endless Online maps: lamps, windows, walls that block light and a cached light field. Shared by the eomap-js editor and game clients such as EOWeb.",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -12,9 +12,31 @@
     }
   },
   "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "catalogue.js",
+    "layer.js",
+    "pixels.js",
+    "appearance",
+    "field",
+    "file",
+    "model",
+    "packs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tabbyed/eomap-js.git",
-    "directory": "src/core/lighting"
+    "url": "git+https://github.com/tabbyed/eo-lighting.git"
   }
 }

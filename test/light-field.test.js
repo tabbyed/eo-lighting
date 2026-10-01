@@ -1,0 +1,480 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { createMap } from "./map.js";
+import { defaultLighting, withLight } from "../model/settings.js";
+import {
+  lampAt,
+  freeLightAt,
+  FREE_LIGHT_PRESET,
+  lightSettings,
+  LAMP_PRESETS,
+} from "../model/lamps.js";
+import {
+  serializeLighting,
+  parseLighting,
+  readLightingFile,
+} from "../file/lighting-file.js";
+import {
+  lightSource,
+  projectLight,
+  lightGroundRadius,
+} from "../model/light-geometry.js";
+import { LightField } from "../field/light-field.js";
+import { SOLID_WALL_GRAPHICS, WallGrid } from "../field/walls.js";
+
+function fixture() {
+  const emf = createMap(24, 18);
+  emf.getTile(8, 6).gfx[1] = 7;
+  const lighting = {
+    ...defaultLighting(),
+    ambient: { color: "#ffffff", brightness: 0.2 },
+  };
+  return { emf, lighting, field: new LightField(emf, lighting) };
+}
+
+test("only catalogued native objects emit; light is bounded and additive", () => {
+  const { emf, lighting, field } = fixture();
+  emf.getTile(5, 5).gfx[1] = 545; // Unlit brazier.
+  field.updateTile(5, 5);
+  assert.equal(lampAt(emf, lighting, 5, 5), null);
+  assert.equal(field.sources.size, 1);
+  assert.equal(field.tint(23, 17), 0x333333);
+  assert.ok(field.tint(8, 6) > field.tint(8, 10));
+  const a = field.values[(6 * emf.width + 8) * 3];
+  emf.getTile(9, 6).gfx[1] = 7;
+  field.updateTile(9, 6);
+  assert.ok(field.values[(6 * emf.width + 8) * 3] > a);
+  emf.getTile(9, 6).gfx[1] = null;
+  field.updateTile(9, 6);
+  assert.ok(Math.abs(field.values[(6 * emf.width + 8) * 3] - a) < 1e-6);
+});
+
+test("ambient changes reuse contributions; disabling and re-enabling leave no stale pool", () => {
+  const { emf, lighting, field } = fixture();
+  const before = field.values.slice();
+  field.setSettings({
+    ...lighting,
+    ambient: { color: "#8899ff", brightness: 0.5 },
+  });
+  assert.deepEqual(field.values, before);
+  const lamp = lampAt(emf, lighting, 8, 6);
+  field.setSettings({
+    ...lighting,
+    lamps: { [lamp.key]: { ...lightSettings(lamp), enabled: false } },
+  });
+  assert.ok(field.values.every((value) => Math.abs(value) < 1e-6));
+  field.setSettings(lighting);
+  assert.deepEqual(field.values, before);
+});
+
+test("glow-only edits reuse surface lighting and round-trip through the sidecar", () => {
+  const { emf, lighting, field } = fixture();
+  const before = field.values.slice();
+  const lamp = lampAt(emf, lighting, 8, 6);
+  field.accumulate = () => assert.fail("Glow must not rebake surface lighting");
+  const changed = withLight(lighting, lamp, { ...lamp, glow: 0 });
+  field.setSettings(changed);
+  assert.deepEqual(field.values, before);
+  assert.deepEqual(
+    parseLighting(serializeLighting(emf, changed), emf),
+    changed,
+  );
+  const invalid = JSON.parse(serializeLighting(emf, changed));
+  invalid.lamps[lamp.key].glow = 5;
+  assert.throws(() => parseLighting(JSON.stringify(invalid), emf), /Bulb glow/);
+});
+
+test("sidecar round-trip validates the matching map and rejects invalid data", () => {
+  const { emf, lighting } = fixture();
+  const text = serializeLighting(emf, lighting);
+  assert.deepEqual(parseLighting(text, emf), lighting);
+  const invalid = JSON.parse(text);
+  invalid.ambient.brightness = -1;
+  assert.throws(
+    () => parseLighting(JSON.stringify(invalid), emf),
+    /Ambient brightness/,
+  );
+  const stale = JSON.parse(text);
+  stale.lights["30,2"] = lightSettings(FREE_LIGHT_PRESET);
+  assert.throws(
+    () => parseLighting(JSON.stringify(stale), emf),
+    /outside the map/,
+    "An unchanged map still rejects entries that do not match it",
+  );
+});
+
+test("lighting saved before a map edit keeps every light that still matches", () => {
+  const { emf, lighting } = fixture();
+  emf.getTile(3, 3).gfx[1] = 6;
+  let saved = withLight(lighting, lampAt(emf, lighting, 8, 6), {
+    ...lampAt(emf, lighting, 8, 6),
+    brightness: 0.5,
+  });
+  saved = withLight(saved, lampAt(emf, saved, 3, 3), {
+    ...lampAt(emf, saved, 3, 3),
+    enabled: false,
+  });
+  saved = withLight(saved, { kind: "free", key: "20,15" }, FREE_LIGHT_PRESET);
+  const text = serializeLighting(emf, saved);
+
+  // Paint the floor, remove one lamp and crop away the free light.
+  emf.getTile(0, 0).gfx[0] = 2;
+  emf.getTile(3, 3).gfx[1] = null;
+  const cropped = createMap(20, 12);
+  for (let y = 0; y < 12; y++)
+    for (let x = 0; x < 20; x++)
+      cropped.getTile(x, y).gfx = [...emf.getTile(x, y).gfx];
+
+  const result = readLightingFile(text, cropped);
+  assert.equal(result.mapChanged, true);
+  assert.equal(result.dropped, 2);
+  assert.deepEqual(result.lighting, {
+    ambient: saved.ambient,
+    lamps: { "8,6,7": saved.lamps["8,6,7"] },
+    lights: {},
+    windows: {},
+  });
+  assert.deepEqual(readLightingFile(text, emf).lighting.lights, saved.lights);
+  assert.throws(
+    () =>
+      readLightingFile(
+        JSON.stringify({ version: 1, assetPack: "eo-native" }),
+        emf,
+      ),
+    /Unsupported/,
+  );
+});
+
+test("removed or cropped lamps are excluded from an exported sidecar", () => {
+  const { emf, lighting } = fixture();
+  lighting.lamps["8,6,7"] = lightSettings(lampAt(emf, lighting, 8, 6));
+  emf.getTile(8, 6).gfx[1] = null;
+  const exported = serializeLighting(emf, lighting);
+  assert.deepEqual(parseLighting(exported, emf).lamps, {});
+});
+
+test("free-light sidecars validate bounds and preserve colour, radius and off state", () => {
+  const { emf, lighting } = fixture();
+  const settings = {
+    ...FREE_LIGHT_PRESET,
+    color: "#aabbff",
+    radius: 1,
+    enabled: false,
+  };
+  const next = withLight(lighting, { kind: "free", key: "4,5" }, settings);
+  const text = serializeLighting(emf, next);
+  assert.deepEqual(parseLighting(text, emf), next);
+  const invalid = JSON.parse(text);
+  invalid.lights["999,999"] = lightSettings(settings);
+  assert.throws(
+    () => parseLighting(JSON.stringify(invalid), emf),
+    /outside the map/,
+  );
+  delete invalid.lights;
+  assert.deepEqual(parseLighting(JSON.stringify(invalid), emf).lights, {});
+});
+
+test("shrinking a live light removes its former outer footprint", () => {
+  const { emf, lighting, field } = fixture();
+  const lamp = lampAt(emf, lighting, 8, 6);
+  assert.ok(field.tint(8, 9) > 0x333333);
+  field.setSettings(
+    withLight(lighting, lamp, { ...lamp, radius: 1, height: 0 }),
+  );
+  assert.equal(field.tint(8, 9), 0x333333);
+  assert.ok(field.tint(8, 6) > 0x333333);
+});
+
+test("source height changes wall-height illumination without moving its ground anchor", () => {
+  const emf = createMap(14, 14);
+  const base = {
+    ...defaultLighting(),
+    ambient: { color: "#ffffff", brightness: 0.2 },
+  };
+  const low = withLight(
+    base,
+    { kind: "free", key: "5,5" },
+    { ...FREE_LIGHT_PRESET, radius: 3, height: 0 },
+  );
+  const field = new LightField(emf, low);
+  const groundBefore = field.tint(5, 5, 0),
+    highBefore = field.tint(5, 5, 96);
+  const raised = withLight(
+    low,
+    { kind: "free", key: "5,5" },
+    { ...FREE_LIGHT_PRESET, radius: 3, height: 96 },
+  );
+  field.setSettings(raised);
+  assert.ok(field.tint(5, 5, 96) > highBefore);
+  assert.ok(field.tint(5, 5, 0) < groundBefore);
+  assert.equal(freeLightAt(emf, raised, 5, 5).height, 96);
+  assert.equal(field.sources.size, 1);
+  assert.deepEqual(parseLighting(serializeLighting(emf, raised), emf), raised);
+});
+
+test("both wall orientations block light, with an opening and explicit ignore-walls option", () => {
+  for (const layer of [3, 4]) {
+    const emf = createMap(20, 20);
+    for (let i = 0; i < 20; i++)
+      emf.getTile(layer === 3 ? i : 8, layer === 3 ? 8 : i).gfx[layer] = 7;
+    const base = {
+      ...defaultLighting(),
+      ambient: { color: "#ffffff", brightness: 0.2 },
+    };
+    const source = layer === 3 ? { x: 8, y: 6 } : { x: 6, y: 8 };
+    const target = layer === 3 ? { x: 8, y: 10 } : { x: 10, y: 8 };
+    const key = `${source.x},${source.y}`;
+    const lighting = withLight(
+      base,
+      { kind: "free", key },
+      { ...FREE_LIGHT_PRESET, radius: 7 },
+    );
+    const field = new LightField(emf, lighting);
+    assert.equal(field.tint(target.x, target.y), 0x333333);
+    assert.ok(field.tint(source.x, source.y) > 0x333333);
+    field.setSettings(
+      withLight(
+        lighting,
+        { kind: "free", key },
+        { ...FREE_LIGHT_PRESET, radius: 7, shadows: false },
+      ),
+    );
+    assert.ok(field.tint(target.x, target.y) > 0x333333);
+    field.setSettings(lighting);
+    emf.getTile(8, 8).gfx[layer] = null;
+    field.queueWall(8, 8);
+    field.flushWalls();
+    assert.ok(field.tint(target.x, target.y) > 0x333333);
+    emf.getTile(8, 8).gfx[layer] = 7;
+    field.queueWall(8, 8);
+    field.flushWalls();
+    assert.equal(field.tint(target.x, target.y), 0x333333);
+  }
+});
+
+test("fences and walkability specs do not become solid optical walls", () => {
+  const emf = createMap(12, 12);
+  emf.getTile(5, 5).gfx[3] = 68;
+  emf.getTile(5, 5).spec = 0;
+  const grid = new WallGrid(emf);
+  assert.equal(grid.edge(5, 5, 0, 1), false);
+  emf.getTile(5, 5).gfx[3] = 7;
+  grid.update(5, 5);
+  assert.equal(grid.edge(5, 5, 0, 1), true);
+  assert.equal(grid.edge(5, 6, 0, -1), true);
+  assert.ok(grid.ray(5, 5, Math.SQRT1_2, Math.SQRT1_2, 4) < 1);
+});
+
+test("a source shadow does not erase another light on the far side", () => {
+  const emf = createMap(20, 20);
+  for (let y = 0; y < 20; y++) emf.getTile(8, y).gfx[4] = 7;
+  const base = {
+    ...defaultLighting(),
+    ambient: { color: "#ffffff", brightness: 0.2 },
+  };
+  let lighting = withLight(
+    base,
+    { kind: "free", key: "6,8" },
+    { ...FREE_LIGHT_PRESET, radius: 7 },
+  );
+  lighting = withLight(
+    lighting,
+    { kind: "free", key: "10,8" },
+    { ...FREE_LIGHT_PRESET, radius: 3 },
+  );
+  const field = new LightField(emf, lighting);
+  const before = field.tint(10, 8);
+  field.setSettings(withLight(lighting, { kind: "free", key: "6,8" }, null));
+  assert.equal(field.tint(10, 8), before);
+  assert.equal(field.groundCornerTint(9, 8, -1, 0), field.tint(9, 8));
+});
+
+test("native sources project onto measured bulb centres and retain integer ownership", () => {
+  // Native gfx004 pixel centres, measured independently of the light catalogue.
+  const artwork = [
+    { graphic: 7, width: 17, height: 119, bulbX: 9, bulbY: 15 },
+    { graphic: 6, width: 30, height: 140, bulbX: 15, bulbY: 25 },
+    { graphic: 400, width: 26, height: 45, bulbX: 13, bulbY: 25 },
+    // Garden lantern: 89 and 90 are identical artwork.
+    { graphic: 89, width: 35, height: 42, bulbX: 16, bulbY: 19 },
+    { graphic: 90, width: 35, height: 42, bulbX: 16, bulbY: 19 },
+    { graphic: 585, width: 30, height: 140, bulbX: 15, bulbY: 25 },
+    { graphic: 379, width: 33, height: 126, bulbX: 15, bulbY: 19 },
+    { graphic: 560, width: 32, height: 140, bulbX: 16, bulbY: 25 },
+    { graphic: 561, width: 32, height: 140, bulbX: 16, bulbY: 25 },
+    { graphic: 565, width: 32, height: 140, bulbX: 16, bulbY: 25 },
+    { graphic: 566, width: 32, height: 140, bulbX: 16, bulbY: 25 },
+    // Candles project onto their flames; tapers onto the flame above the wick.
+    { graphic: 73, width: 40, height: 71, bulbX: 25, bulbY: 5 },
+    { graphic: 74, width: 40, height: 71, bulbX: 14, bulbY: 5 },
+    { graphic: 587, width: 36, height: 64, bulbX: 17, bulbY: 0 },
+    { graphic: 595, width: 36, height: 64, bulbX: 18, bulbY: 0 },
+    { graphic: 591, width: 57, height: 61, bulbX: 44, bulbY: 9 },
+    { graphic: 596, width: 57, height: 61, bulbX: 12, bulbY: 9 },
+    { graphic: 660, width: 42, height: 64, bulbX: 28, bulbY: 5 },
+    { graphic: 661, width: 42, height: 64, bulbX: 13, bulbY: 5 },
+    { graphic: 742, width: 78, height: 98, bulbX: 37, bulbY: -2 },
+    { graphic: 743, width: 69, height: 98, bulbX: 37, bulbY: -2 },
+    { graphic: 744, width: 71, height: 98, bulbX: 30, bulbY: -2 },
+    { graphic: 745, width: 78, height: 98, bulbX: 40, bulbY: -2 },
+    { graphic: 746, width: 69, height: 98, bulbX: 31, bulbY: -2 },
+    { graphic: 747, width: 71, height: 98, bulbX: 40, bulbY: -2 },
+    { graphic: 738, width: 60, height: 123, bulbX: 27, bulbY: 0 },
+    { graphic: 748, width: 34, height: 40, bulbX: 15, bulbY: -2 },
+    { graphic: 546, width: 42, height: 90, bulbX: 20, bulbY: 20 },
+    // The fireplace: its fire at log height, just in front of the hearth.
+    { graphic: 77, width: 32, height: 67, bulbX: 26, bulbY: 48 },
+  ];
+  const emf = createMap(16, 16);
+  for (const art of artwork) {
+    emf.getTile(6, 7).gfx[1] = art.graphic;
+    const light = lampAt(emf, defaultLighting(), 6, 7);
+    const projected = projectLight(light);
+    assert.equal(
+      projected.x,
+      (6 - 7) * 32 + 30 - Math.floor(art.width / 2) + art.bulbX,
+    );
+    assert.equal(projected.sourceY, (6 + 7) * 16 + 30 - art.height + art.bulbY);
+    const source = lightSource(light);
+    assert.ok(Math.abs(source.x - 6) < 0.5 && Math.abs(source.y - 7) < 0.5);
+    assert.equal(light.key, `6,7,${art.graphic}`);
+    const saved = withLight(defaultLighting(), light, light);
+    assert.equal(saved.lamps[light.key].anchor, undefined);
+    assert.deepEqual(parseLighting(serializeLighting(emf, saved), emf), saved);
+  }
+});
+
+test("sprite variants keep their own geometry but share the preset they place", () => {
+  const emf = createMap(8, 8);
+  const at = (graphic) => {
+    emf.getTile(3, 3).gfx[1] = graphic;
+    return lampAt(emf, defaultLighting(), 3, 3);
+  };
+  const shelf = at(73),
+    mirror = at(74);
+  assert.equal(mirror.id, shelf.id);
+  assert.equal(mirror.graphic, 74);
+  assert.equal(mirror.height, shelf.height);
+  assert.notDeepEqual(mirror.anchor, shelf.anchor);
+  assert.equal(
+    LAMP_PRESETS.find((preset) => preset.id === mirror.id).graphic,
+    73,
+  );
+  // A variant may also override the source height.
+  assert.equal(at(738).id, at(742).id);
+  assert.notEqual(at(738).height, at(742).height);
+  // Identical artwork listed by graphic ID reuses the preset unchanged.
+  assert.deepEqual(at(585).anchor, at(6).anchor);
+});
+
+test("ground guide shrinks with height and disappears above reach without moving the anchor", () => {
+  const light = { ...FREE_LIGHT_PRESET, x: 4, y: 5, radius: 5 };
+  assert.equal(lightGroundRadius(light), 5);
+  assert.equal(lightGroundRadius({ ...light, height: 96 }), 4);
+  assert.equal(lightGroundRadius({ ...light, height: 160 }), 0);
+  assert.equal(lightGroundRadius({ ...light, height: 192 }), 0);
+  const low = projectLight(light),
+    high = projectLight({ ...light, height: 96 });
+  assert.equal(low.x, high.x);
+  assert.equal(low.groundY, high.groundY);
+  assert.equal(low.sourceY - high.sourceY, 96);
+});
+
+test("indoor walls block light and are shaded as surfaces; their doorways stay open", () => {
+  // Every wall a native shelf candle hangs on.
+  for (const graphic of [262, 369, 379, 384, 394, 407, 411, 423])
+    assert.ok(SOLID_WALL_GRAPHICS.has(graphic), `Wall ${graphic}`);
+  const emf = createMap(12, 12);
+  // A room's wall along x = 5.5, with a doorway (385) at y = 6.
+  for (let y = 3; y < 9; y++) emf.getTile(5, y).gfx[4] = y === 6 ? 385 : 384;
+  const walls = new WallGrid(emf);
+  assert.equal(walls.edge(5, 5, 1, 0), true);
+  assert.equal(walls.edge(5, 6, 1, 0), false);
+  const lighting = withLight(
+    { ...defaultLighting(), ambient: { color: "#000000", brightness: 0 } },
+    { kind: "free", key: "4,5" },
+    { ...FREE_LIGHT_PRESET, radius: 4 },
+  );
+  const field = new LightField(emf, lighting);
+  assert.equal(field.tint(7, 5), 0, "light leaked through the wall");
+  lighting.lights = { "4,6": lighting.lights["4,5"] };
+  assert.ok(new LightField(emf, lighting).tint(7, 6) > 0, "doorway closed");
+});
+
+test("fractional sources hit both wall orientations from either side and at corners", () => {
+  const emf = createMap(10, 10);
+  emf.getTile(4, 4).gfx[4] = 7;
+  emf.getTile(4, 4).gfx[3] = 7;
+  const walls = new WallGrid(emf);
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-6, `${a} != ${b}`);
+  near(walls.ray(4.4, 4.3, 1, 0, 3), 0.1);
+  near(walls.ray(4.8, 4.3, -1, 0, 3), 0.3);
+  near(walls.ray(4.3, 4.4, 0, 1, 3), 0.1);
+  near(walls.ray(4.3, 4.8, 0, -1, 3), 0.3);
+  near(walls.ray(4.25, 4.25, Math.SQRT1_2, Math.SQRT1_2, 3), Math.SQRT2 / 4);
+  assert.equal(walls.ray(4.5, 4.3, -1, 0, 3), 0);
+  assert.equal(walls.ray(4.5, 4.3, 1, 0, 3), 3);
+  assert.equal(walls.ray(0, 0, -1, 0, 3), 3);
+});
+
+test("wall edits near offset lamps match a complete field rebuild", () => {
+  const emf = createMap(30, 30);
+  const base = defaultLighting();
+  for (const preset of LAMP_PRESETS) {
+    emf.getTile(8, 8).gfx[1] = preset.graphic;
+    const lamp = lampAt(emf, base, 8, 8);
+    const lighting = withLight(base, lamp, { ...lamp, radius: 12 });
+    const field = new LightField(emf, lighting);
+    for (const [x, y, layer] of [
+      [8, 8, 3],
+      [8, 8, 4],
+      [20, 8, 3],
+    ]) {
+      for (const graphic of [3, null]) {
+        emf.getTile(x, y).gfx[layer] = graphic;
+        field.queueWall(x, y);
+        field.flushWalls();
+        const rebuilt = new LightField(emf, lighting);
+        for (let i = 0; i < field.values.length; i++)
+          assert.ok(Math.abs(field.values[i] - rebuilt.values[i]) < 1e-6);
+      }
+    }
+  }
+});
+
+test("a placement preview survives wall edits and leaves no trace when cleared", () => {
+  const { emf, lighting } = fixture();
+  const field = new LightField(emf, lighting);
+  const lamp = lampAt(emf, lighting, 8, 6);
+  const placed = { ...FREE_LIGHT_PRESET, x: 10, y: 8, key: "10,8" };
+  // Preview moving the lamp while a wall between them is added and removed.
+  field.setPreview({ light: placed, replaces: lamp });
+  for (const graphic of [7, null, 7]) {
+    emf.getTile(9, 7).gfx[3] = graphic;
+    field.queueWall(9, 7);
+    field.flushWalls();
+    const expected = new LightField(emf, lighting);
+    expected.accumulate(placed, 1);
+    expected.accumulate(lamp, -1);
+    for (let i = 0; i < field.values.length; i++)
+      assert.ok(Math.abs(field.values[i] - expected.values[i]) < 1e-6);
+  }
+  field.setPreview(null);
+  const clean = new LightField(emf, lighting);
+  for (let i = 0; i < field.values.length; i++)
+    assert.ok(Math.abs(field.values[i] - clean.values[i]) < 1e-6);
+});
+
+test("changing settings drops a placement preview", () => {
+  const { emf, lighting } = fixture();
+  const field = new LightField(emf, lighting);
+  field.setPreview({ light: { ...FREE_LIGHT_PRESET, x: 3, y: 3, key: "3,3" } });
+  field.setSettings({
+    ...lighting,
+    ambient: { color: "#ffffff", brightness: 0.4 },
+  });
+  assert.equal(field.preview, null);
+  const clean = new LightField(emf, field.settings);
+  for (let i = 0; i < field.values.length; i++)
+    assert.ok(Math.abs(field.values[i] - clean.values[i]) < 1e-6);
+});
